@@ -1,2 +1,3 @@
+include ':mobileapi'
 include ':app'
 rootProject.name = "ClariusStream"
