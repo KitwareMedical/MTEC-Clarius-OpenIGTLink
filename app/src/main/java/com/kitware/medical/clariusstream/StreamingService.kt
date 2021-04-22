@@ -14,7 +14,6 @@ import android.widget.Toast
 import me.clarius.mobileapi.MobileApi
 import java.lang.Exception
 import java.lang.ref.WeakReference
-import java.util.stream.Stream
 
 class StreamingService : Service() {
 
@@ -34,23 +33,34 @@ class StreamingService : Service() {
 
     // are we registered with the clarius service
     private var mRegistered: Boolean = false
-    private var mClariusHandlerThread: HandlerThread? = null
+
+    // thread to send images
+    private var mImageWorkerThread: HandlerThread? = null
+
+    // messenger to the image worker handler
+    private var mImageWorker: Messenger? = null
 
     private val mObserver = object : ClariusMessageObserver {
         override fun onConnected(connected: Boolean) {
             if (connected) {
                 Toast.makeText(applicationContext, "Connected!", Toast.LENGTH_SHORT).show()
+                sendImageConfig()
             }
         }
 
         override fun onConfiguredImage(configured: Boolean) {
-            TODO("Not yet implemented")
+            Log.d(TAG, "Configured image status: $configured")
         }
 
-        override fun onNewProcessedImage() {
-            TODO("Not yet implemented")
+        override fun onNewProcessedImage(data: Bundle) {
+            val msg = Message.obtain(null, Constants.ImageWorker.IMAGE_DATA)
+            msg.data = data
+            try {
+                mImageWorker?.send(msg)
+            } catch (e: RemoteException) {
+                e.printStackTrace()
+            }
         }
-
     }
 
     // connection to Clarius service
@@ -60,7 +70,7 @@ class StreamingService : Service() {
             mService = Messenger(service)
             mClient = Messenger(ClariusHandler(mObserver))
             mBound = true
-            registerWithService()
+            registerWithClariusService()
         }
 
         override fun onServiceDisconnected(name: ComponentName?) {
@@ -118,7 +128,7 @@ class StreamingService : Service() {
                     }
                 }
                 MobileApi.MSG_NEW_PROCESSED_IMAGE -> {
-                    mObserver.get()?.onNewProcessedImage()
+                    mObserver.get()?.onNewProcessedImage(msg.data)
                 }
                 else -> super.handleMessage(msg)
             }
@@ -135,9 +145,11 @@ class StreamingService : Service() {
                 Constants.START_SERVICE -> {
                     if (bindToClariusService()) {
                         setupService()
+                        setupImageWorkerThread()
                     }
                 }
                 Constants.STOP_SERVICE -> {
+                    mImageWorkerThread?.quit()
                     teardownService(startId)
                 }
                 else -> {
@@ -201,14 +213,21 @@ class StreamingService : Service() {
 
     private fun teardownService(startId: Int) {
         if (mBound) {
-            unregisterFromService()
+            unregisterFromClariusService()
             unbindService(mConn)
         }
         // will also invoke stopForeground(true)
         stopSelf(startId)
     }
 
-    private fun registerWithService() {
+    private fun setupImageWorkerThread() {
+        mImageWorkerThread = HandlerThread("ImageWorkerThread").also { thread ->
+            thread.start()
+            mImageWorker = Messenger(ImageWorkerHandler(thread.looper))
+        }
+    }
+
+    private fun registerWithClariusService() {
         if (mBound) {
             val msg = Message.obtain(null, MobileApi.MSG_REGISTER_CLIENT)
             msg.replyTo = mClient
@@ -224,7 +243,7 @@ class StreamingService : Service() {
         }
     }
 
-    private fun unregisterFromService() {
+    private fun unregisterFromClariusService() {
         if (mBound && mRegistered) {
             val msg = Message.obtain(null, MobileApi.MSG_UNREGISTER_CLIENT)
             try {
@@ -247,7 +266,7 @@ class StreamingService : Service() {
     }
 
     private fun sendImageConfig() {
-        if (mBound) {
+        if (mBound && mRegistered) {
             val msg = Message.obtain(null, MobileApi.MSG_CONFIGURE_IMAGE)
             msg.replyTo = mClient
             msg.arg1 = Requests.CONFIGURE_IMAGE
