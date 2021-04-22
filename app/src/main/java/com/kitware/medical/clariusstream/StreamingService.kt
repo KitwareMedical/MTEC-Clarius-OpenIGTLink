@@ -23,21 +23,50 @@ class StreamingService : Service() {
         const val TAG = "ClariusStream"
     }
 
+    // messenger to clarius service
     private var mService: Messenger? = null
-    private var mClient: Messenger? = null
-    private var mBound: Boolean = false
-    private var mRegistered: Boolean = false
 
+    // messenger to handle replies from clarius service
+    private var mClient: Messenger? = null
+
+    // is clarius service bound
+    private var mBound: Boolean = false
+
+    // are we registered with the clarius service
+    private var mRegistered: Boolean = false
+    private var mClariusHandlerThread: HandlerThread? = null
+
+    private val mObserver = object : ClariusMessageObserver {
+        override fun onConnected(connected: Boolean) {
+            if (connected) {
+                Toast.makeText(applicationContext, "Connected!", Toast.LENGTH_SHORT).show()
+            }
+        }
+
+        override fun onConfiguredImage(configured: Boolean) {
+            TODO("Not yet implemented")
+        }
+
+        override fun onNewProcessedImage() {
+            TODO("Not yet implemented")
+        }
+
+    }
+
+    // connection to Clarius service
     private val mConn = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
             // wraps the raw IBinder to the service with the Messenger interface
             mService = Messenger(service)
+            mClient = Messenger(ClariusHandler(mObserver))
             mBound = true
             registerWithService()
         }
 
         override fun onServiceDisconnected(name: ComponentName?) {
+            // unregisterFromService invoked in teardownService
             mService = null
+            mClient = null
             mBound = false
         }
 
@@ -48,23 +77,6 @@ class StreamingService : Service() {
                 Toast.LENGTH_SHORT
             ).show()
         }
-    }
-
-    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        intent?.let {
-            when (it.action) {
-                Constants.START_SERVICE -> {
-                    startStreamingService()
-                }
-                Constants.STOP_SERVICE -> {
-                    stopStreamingService(startId)
-                }
-                else -> {
-                    throw Exception("Invalid command")
-                }
-            }
-        }
-        return START_STICKY
     }
 
     /**
@@ -84,21 +96,29 @@ class StreamingService : Service() {
         }
     }
 
-    internal class IncomingHandler(
-        service: StreamingService,
-        private val mService: WeakReference<StreamingService> = WeakReference(service)
+    class ClariusHandler(
+        observer: ClariusMessageObserver,
+        private val mObserver: WeakReference<ClariusMessageObserver> = WeakReference(
+            observer
+        )
     ) : Handler(Looper.getMainLooper()) {
         override fun handleMessage(msg: Message) {
             when (msg.what) {
                 MobileApi.MSG_RETURN_STATUS -> {
                     val param = msg.arg1
                     val status = msg.arg2
-                    if (param == Requests.REGISTER) {
-                        mService.get()?.onConnected(status == 0)
+                    when (param) {
+                        Requests.REGISTER -> {
+                            mObserver.get()?.onConnected(status == 0)
+                        }
+                        Requests.CONFIGURE_IMAGE -> {
+                            mObserver.get()?.onConfiguredImage(status == 0)
+                        }
+                        else -> {}
                     }
                 }
                 MobileApi.MSG_NEW_PROCESSED_IMAGE -> {
-                    println("Got new image")
+                    mObserver.get()?.onNewProcessedImage()
                 }
                 else -> super.handleMessage(msg)
             }
@@ -109,25 +129,40 @@ class StreamingService : Service() {
         return null
     }
 
-    private fun startStreamingService() {
-        Intent().also {
-            it.component =
-                ComponentName(BuildConfig.CLARIUS_PACKAGE_NAME, BuildConfig.CLARIUS_SERVICE_NAME)
-            if (bindService(it, mConn, Context.BIND_AUTO_CREATE)) {
-                startForegroundService()
-                Log.d(TAG, "Started foreground service")
-            } else {
-                unbindService(mConn)
-                Toast.makeText(
-                    this,
-                    "Could not connect. Is the probe connected?",
-                    Toast.LENGTH_SHORT
-                ).show()
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        intent?.let {
+            when (it.action) {
+                Constants.START_SERVICE -> {
+                    if (bindToClariusService()) {
+                        setupService()
+                    }
+                }
+                Constants.STOP_SERVICE -> {
+                    teardownService(startId)
+                }
+                else -> {
+                    throw Exception("Invalid command")
+                }
             }
+        }
+        return START_STICKY
+    }
+
+    private fun bindToClariusService(): Boolean {
+        Intent().also { intent ->
+            intent.component =
+                ComponentName(BuildConfig.CLARIUS_PACKAGE_NAME, BuildConfig.CLARIUS_SERVICE_NAME)
+            if (bindService(intent, mConn, Context.BIND_AUTO_CREATE)) {
+                return true
+            }
+
+            // failed to bind service
+            unbindService(mConn)
+            return false
         }
     }
 
-    private fun startForegroundService() {
+    private fun setupService() {
         val notificationIntent = Intent(this, MainActivity::class.java)
         val pendingMainIntent = PendingIntent.getActivity(this, 0, notificationIntent, 0)
 
@@ -155,18 +190,6 @@ class StreamingService : Service() {
         startForeground(NOTIFICATION_ID, notification)
     }
 
-    private fun stopStreamingService(startId: Int) {
-        mClient?.let {
-            unregisterFromService()
-        }
-        if (mBound) {
-            unbindService(mConn)
-            mBound = false
-        }
-        // will also invoke stopForeground(true)
-        stopSelf(startId)
-    }
-
     private fun createNotificationChannel(channelId: String, channelName: String): String {
         val chan = NotificationChannel(channelId, channelName, NotificationManager.IMPORTANCE_NONE)
         chan.lightColor = Color.GREEN
@@ -176,9 +199,17 @@ class StreamingService : Service() {
         return channelId
     }
 
+    private fun teardownService(startId: Int) {
+        if (mBound) {
+            unregisterFromService()
+            unbindService(mConn)
+        }
+        // will also invoke stopForeground(true)
+        stopSelf(startId)
+    }
+
     private fun registerWithService() {
         if (mBound) {
-            mClient = Messenger(IncomingHandler(this))
             val msg = Message.obtain(null, MobileApi.MSG_REGISTER_CLIENT)
             msg.replyTo = mClient
             // sets the callback param
@@ -206,12 +237,6 @@ class StreamingService : Service() {
         }
     }
 
-    private fun onConnected(connected: Boolean) {
-        if (connected) {
-            Toast.makeText(this, "Connected!", Toast.LENGTH_SHORT).show()
-            sendImageConfig()
-        }
-    }
 
     private fun makeImageConfig(): Bundle {
         return Bundle().also { bundle ->
