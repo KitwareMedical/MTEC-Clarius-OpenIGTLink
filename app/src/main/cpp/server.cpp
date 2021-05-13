@@ -57,21 +57,6 @@ void ImageServer::SendImageBasic(
   char *imageData,
   size_t len
 ) {
-  std::cout << "dims: ";
-  for (int i = 0; i < 3; i++) std::cout << dims[i] << " ";
-  std::cout << std::endl;
-
-  std::cout << "spacing: ";
-  for (int i = 0; i < 3; i++) std::cout << spacing[i] << " ";
-  std::cout << std::endl;
-
-  std::cout << "scalar type: " << scalarType << std::endl;
-
-  std::cout << "device name: " << deviceName << std::endl;
-
-  for (int i = 0; i < len; i++) std::cout << (int)imageData[i] << " ";
-  std::cout << std::endl;
-
   igtl::ImageMessage::Pointer img = igtl::ImageMessage::New();
   img->SetDimensions(dims);
   img->SetSpacing(spacing);
@@ -82,14 +67,14 @@ void ImageServer::SendImageBasic(
   img->SetSubVolume(dims, offset);
   img->AllocateScalars();
 
-  unsigned char *scalars = (unsigned char*)img->GetScalarPointer();
+  auto *scalars = (unsigned char*)img->GetScalarPointer();
   for (int i = 0; i < len; i++) {
       scalars[i] = imageData[i];
   }
 
   img->Pack();
 
-  for (auto client : m_clients) {
+  for (const auto & client : m_clients) {
     client->Send(img->GetPackPointer(), img->GetPackSize());
   }
 }

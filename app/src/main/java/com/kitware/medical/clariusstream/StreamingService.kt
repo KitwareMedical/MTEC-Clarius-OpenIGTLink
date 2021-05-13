@@ -11,6 +11,7 @@ import android.os.*
 import android.util.Log
 import android.util.Size
 import android.widget.Toast
+import com.igtl.ImageServer
 import me.clarius.mobileapi.MobileApi
 import java.lang.Exception
 import java.lang.ref.WeakReference
@@ -20,6 +21,11 @@ class StreamingService : Service() {
     companion object {
         const val NOTIFICATION_ID = 1
         const val TAG = "ClariusStream"
+        const val IGTL_PORT = 18944
+
+        init {
+            System.loadLibrary("igtljava")
+        }
     }
 
     // messenger to clarius service
@@ -39,6 +45,9 @@ class StreamingService : Service() {
 
     // messenger to the image worker handler
     private var mImageWorker: Messenger? = null
+
+    // the igtl image server
+    private var mImageServer: ImageServer? = null
 
     private val mObserver = object : ClariusMessageObserver {
         override fun onConnected(connected: Boolean) {
@@ -128,6 +137,7 @@ class StreamingService : Service() {
                     }
                 }
                 MobileApi.MSG_NEW_PROCESSED_IMAGE -> {
+                    Log.d(TAG, "-- Received image")
                     mObserver.get()?.onNewProcessedImage(msg.data)
                 }
                 else -> super.handleMessage(msg)
@@ -149,7 +159,7 @@ class StreamingService : Service() {
                     }
                 }
                 Constants.STOP_SERVICE -> {
-                    mImageWorkerThread?.quit()
+                    teardownImageWorkerThread()
                     teardownService(startId)
                 }
                 else -> {
@@ -223,8 +233,20 @@ class StreamingService : Service() {
     private fun setupImageWorkerThread() {
         mImageWorkerThread = HandlerThread("ImageWorkerThread").also { thread ->
             thread.start()
-            mImageWorker = Messenger(ImageWorkerHandler(thread.looper))
+            mImageServer = ImageServer().also { server ->
+                val result = server.CreateServer(IGTL_PORT)
+                Log.d(TAG, "igtl server creation status: $result")
+                mImageWorker = Messenger(ImageWorkerHandler(thread.looper, server))
+            }
         }
+    }
+
+    private fun teardownImageWorkerThread() {
+        mImageWorkerThread?.quit()
+        mImageWorkerThread = null
+        mImageWorker = null
+        mImageServer?.delete()
+        mImageServer = null
     }
 
     private fun registerWithClariusService() {
