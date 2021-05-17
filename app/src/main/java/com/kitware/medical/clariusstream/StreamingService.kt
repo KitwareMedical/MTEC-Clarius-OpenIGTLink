@@ -7,6 +7,9 @@ import android.content.Intent
 import android.content.ServiceConnection
 import android.graphics.Color
 import android.graphics.drawable.Icon
+import android.net.ConnectivityManager
+import android.net.LinkProperties
+import android.net.Network
 import android.os.*
 import android.util.Log
 import android.util.Size
@@ -15,6 +18,7 @@ import com.igtl.ImageServer
 import me.clarius.mobileapi.MobileApi
 import java.lang.Exception
 import java.lang.ref.WeakReference
+import java.net.Inet4Address
 
 class StreamingService : Service() {
 
@@ -49,7 +53,22 @@ class StreamingService : Service() {
     // the igtl image server
     private var mImageServer: ImageServer? = null
 
+    private lateinit var mNotificationBuilder: Notification.Builder
+
+    private val mNetworkCallback = object : ConnectivityManager.NetworkCallback() {
+        override fun onLinkPropertiesChanged(network: Network, linkProperties: LinkProperties) {
+            val addr = getWifiAddress(linkProperties)
+            updateForegroundNotification(addr)
+        }
+
+        override fun onLost(network: Network) {
+            updateForegroundNotification("")
+        }
+    }
+
     private val mObserver = object : ClariusMessageObserver {
+        private var counter = 0
+
         override fun onConnected(connected: Boolean) {
             if (connected) {
                 Toast.makeText(applicationContext, "Connected!", Toast.LENGTH_SHORT).show()
@@ -137,7 +156,6 @@ class StreamingService : Service() {
                     }
                 }
                 MobileApi.MSG_NEW_PROCESSED_IMAGE -> {
-                    Log.d(TAG, "-- Received image")
                     mObserver.get()?.onNewProcessedImage(msg.data)
                 }
                 else -> super.handleMessage(msg)
@@ -156,9 +174,11 @@ class StreamingService : Service() {
                     if (bindToClariusService()) {
                         setupService()
                         setupImageWorkerThread()
+                        setupNetworkCallback()
                     }
                 }
                 Constants.STOP_SERVICE -> {
+                    teardownNetworkCallback()
                     teardownImageWorkerThread()
                     teardownService(startId)
                 }
@@ -185,31 +205,41 @@ class StreamingService : Service() {
     }
 
     private fun setupService() {
-        val notificationIntent = Intent(this, MainActivity::class.java)
-        val pendingMainIntent = PendingIntent.getActivity(this, 0, notificationIntent, 0)
+        if (!this::mNotificationBuilder.isInitialized) {
+            val notificationIntent = Intent(this, MainActivity::class.java)
+            val pendingMainIntent = PendingIntent.getActivity(this, 0, notificationIntent, 0)
 
-        val stopIntent = Intent(this, StreamingService::class.java).also {
-            it.action = Constants.STOP_SERVICE
+            val stopIntent = Intent(this, StreamingService::class.java).also {
+                it.action = Constants.STOP_SERVICE
+            }
+            val pendingStopIntent = PendingIntent.getService(this, 0, stopIntent, 0)
+            val stopAction = Notification.Action.Builder(
+                Icon.createWithResource(
+                    this,
+                    R.drawable.ic_launcher_background
+                ), "Stop", pendingStopIntent
+            ).build()
+
+            val connMgr = getSystemService(ConnectivityManager::class.java)
+            val linkProps = connMgr.getLinkProperties(connMgr.activeNetwork)
+            val addr = getWifiAddress(linkProps)
+            val ipPort = if (addr.isEmpty()) {
+                "No IP address"
+            } else {
+                "$addr:$IGTL_PORT"
+            }
+
+            val channelId =
+                createNotificationChannel("clarius_stream_service", "Clarius Stream Service")
+            mNotificationBuilder = Notification.Builder(this, channelId)
+                .setContentTitle("Clarius IGTL Stream enabled")
+                .setContentText("IP/Port: $ipPort")
+                .setSmallIcon(R.drawable.ic_launcher_background)
+                .setContentIntent(pendingMainIntent)
+                .addAction(stopAction)
         }
-        val pendingStopIntent = PendingIntent.getService(this, 0, stopIntent, 0)
-        val stopAction = Notification.Action.Builder(
-            Icon.createWithResource(
-                this,
-                R.drawable.ic_launcher_background
-            ), "Stop", pendingStopIntent
-        ).build()
 
-        val channelId =
-            createNotificationChannel("clarius_stream_service", "Clarius Stream Service")
-        val notification = Notification.Builder(this, channelId)
-            .setContentTitle("Clarius IGTL Stream enabled")
-            .setContentText("IP/Port:")
-            .setSmallIcon(R.drawable.ic_launcher_background)
-            .setContentIntent(pendingMainIntent)
-            .addAction(stopAction)
-            .build()
-
-        startForeground(NOTIFICATION_ID, notification)
+        startForeground(NOTIFICATION_ID, mNotificationBuilder.build())
     }
 
     private fun createNotificationChannel(channelId: String, channelName: String): String {
@@ -247,6 +277,16 @@ class StreamingService : Service() {
         mImageWorker = null
         mImageServer?.delete()
         mImageServer = null
+    }
+
+    private fun setupNetworkCallback() {
+        val connMgr = getSystemService(ConnectivityManager::class.java)
+        connMgr.registerDefaultNetworkCallback(mNetworkCallback)
+    }
+
+    private fun teardownNetworkCallback() {
+        val connMgr = getSystemService(ConnectivityManager::class.java)
+        connMgr.unregisterNetworkCallback(mNetworkCallback)
     }
 
     private fun registerWithClariusService() {
@@ -300,5 +340,25 @@ class StreamingService : Service() {
                 Toast.makeText(this, "Failed to send image config", Toast.LENGTH_SHORT).show()
             }
         }
+    }
+
+    private fun getWifiAddress(linkProps: LinkProperties?): String {
+        return linkProps?.linkAddresses?.find { it.address is Inet4Address }
+            ?.let { addr ->
+            addr.address.hostAddress
+        } ?: ""
+    }
+
+    private fun updateForegroundNotification(addr: String) {
+        val ipPort = if (addr.isEmpty()) {
+            "No IP address"
+        } else {
+            "$addr:$IGTL_PORT"
+        }
+
+        mNotificationBuilder.setContentText("IP/Port: $ipPort")
+
+        val notificationMgr = getSystemService(NotificationManager::class.java) as NotificationManager
+        notificationMgr.notify(NOTIFICATION_ID, mNotificationBuilder.build())
     }
 }
